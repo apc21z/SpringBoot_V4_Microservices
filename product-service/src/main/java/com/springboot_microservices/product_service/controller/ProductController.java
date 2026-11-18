@@ -19,8 +19,8 @@ import com.springboot_microservices.product_service.service.ProductService;
 
 import jakarta.validation.Valid;
 
-@RestController 
-@RequestMapping ("/api/products")
+@RestController
+@RequestMapping("/api/products")
 public class ProductController {
     private final ProductService productService;
 
