@@ -2,6 +2,8 @@
 
 Repositorio de microservicios independientes con Spring Boot. La arquitectura objetivo contempla un gateway, descubrimiento de servicios, configuración centralizada, autenticación, bases de datos por servicio y comunicación por eventos. El código actual implementa solo una parte de ese esquema; el estado real se detalla más abajo.
 
+Consulta [Comunicaciones.md](./Comunicaciones.md) para ver los flujos previstos entre servicios y el estado actual de RabbitMQ.
+
 ## Módulos y puertos
 
 | Módulo | Puerto | Responsabilidad / estado actual |
