@@ -3,8 +3,17 @@ server:
 spring:
   application:
     name: order-service
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:admin}
+    password: ${RABBITMQ_PASSWORD:password}
+    publisher-confirm-type: correlated
   datasource:
     url: jdbc:postgresql://localhost:5432/order_service
     username: postgres
     password: password
     driver-class-name: org.postgresql.Driver
+inventory:
+  service:
+    base-url: ${INVENTORY_SERVICE_URL:http://localhost:8083}

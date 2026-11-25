@@ -17,6 +17,7 @@ flowchart LR
     P --> MDB[(MongoDB :27017)]
     O --> PDB[(PostgreSQL :5432)]
     I --> MY[(MySQL :3306)]
+    O -->|HTTP + WebClient: reservar/liberar SKU| I
 
     O -. evento de pedido, AMQP .-> R[RabbitMQ :5672]
     R -. entrega desde una cola .-> N[Notification Service :8084]
@@ -40,18 +41,33 @@ HTTP es apropiado cuando el usuario necesita una respuesta inmediata, por ejempl
 4. Product Service procesa la petición y consulta o actualiza MongoDB.
 5. La respuesta vuelve por el Gateway al usuario.
 
-En el esquema, las rutas previstas son `/api/products`, `/api/orders` y `/api/inventory`. El comportamiento exacto de autenticación y las respuestas HTTP todavía deben definirse e implementarse.
+Las APIs directas `/api/products`, `/api/orders` y `/api/inventory` están implementadas. El Gateway, la autenticación y el acceso a estas rutas a través del Gateway siguen pendientes.
+
+## Reserva de inventario entre Order e Inventory
+
+Al crear un pedido, Order Service llama sincrónicamente a Inventory Service con `WebClient`:
+
+```http
+POST /api/inventory/{skuCode}/reservations
+Content-Type: application/json
+
+{"quantity": 2}
+```
+
+Inventory bloquea la fila del SKU durante la operación, comprueba el stock y lo descuenta de forma transaccional. Devuelve `204` si reserva, `404` si el SKU no existe y `409` si no hay suficiente stock. Order guarda el pedido después de reservar. Si falla el guardado, intenta liberar el stock; al actualizar ajusta la diferencia y al eliminar libera las cantidades del pedido.
+
+La URL del servicio se configura con `INVENTORY_SERVICE_URL` (por defecto `http://localhost:8083`). Como se trata de dos aplicaciones MVC, Order usa `WebClient` de forma bloqueante en el flujo HTTP. La llamada remota y la escritura en PostgreSQL no forman una transacción distribuida; el mecanismo de compensación cubre fallos conocidos, pero para producción se necesitan operaciones idempotentes y reconciliación ante caídas durante la llamada.
 
 ## Flujo asíncrono: pedido y notificación con RabbitMQ
 
 Una notificación por correo no necesita bloquear la respuesta de la API de pedidos. El servicio de pedidos puede publicar un **evento**, y Notification Service procesarlo cuando esté disponible:
 
 1. El usuario envía la solicitud de pedido al Gateway.
-2. Order Service valida y guarda el pedido en PostgreSQL.
-3. Tras guardar el pedido, Order Service publica un evento en RabbitMQ, por ejemplo `order.created`.
-4. RabbitMQ enruta el evento a una cola asociada a notificaciones.
-5. Notification Service consume el mensaje y envía el correo.
-6. Si el procesamiento termina correctamente, el consumidor confirma el mensaje (**ACK**). Si falla, RabbitMQ puede volver a entregarlo según la política de reintentos configurada.
+2. Order Service solicita a Inventory Service reservar las cantidades de cada SKU mediante HTTP con `WebClient`.
+3. Inventory Service descuenta el stock de forma transaccional y rechaza la reserva si no hay unidades suficientes.
+4. Si las reservas terminan correctamente, Order Service guarda el pedido en PostgreSQL. Si falla el guardado, intenta liberar las reservas como compensación.
+5. Después del commit de PostgreSQL, Order Service publica el evento `order.created` en el exchange `orders.events`.
+6. Notification Service consume la cola `notification.order-created` y envía el correo. Si el envío falla, se reintenta y, tras agotar los intentos, el mensaje pasa a `notification.order-created.dlq`.
 
 La respuesta HTTP del pedido y el envío del correo son trabajos distintos: la API puede responder una vez registrado el pedido, sin esperar al proveedor de correo. El código de respuesta concreto (por ejemplo, `201` o `202`) debe formar parte del contrato de la API.
 
@@ -65,7 +81,9 @@ La respuesta HTTP del pedido y el envío del correo son trabajos distintos: la A
 - **Consumidor:** aplicación que lee y procesa los mensajes; en este flujo sería Notification Service.
 - **ACK:** confirmación de que el consumidor procesó el mensaje. Sin ACK, el mensaje puede volver a entregarse.
 
-Como propuesta inicial, se podría usar un exchange `orders.events`, una routing key `order.created` y una cola `notification.order-created`. Son nombres ilustrativos: el repositorio todavía no define exchanges, colas, bindings ni un contrato de evento.
+El contrato usado incluye `eventId`, `eventType`, `occurredAt`, `orderId`, `customerEmail` y las líneas del pedido. Order y Notification declaran la misma topología AMQP para que el broker tenga exchange, cola, binding y dead-letter queue aunque los servicios arranquen en distinto orden.
+
+La reserva HTTP y la escritura del pedido en PostgreSQL no forman una transacción distribuida. Order intenta compensar liberando stock si la escritura falla; si el servicio cae o la compensación no se puede completar, se requiere reconciliación. La publicación RabbitMQ ocurre después del commit: si el broker falla, el pedido queda guardado y la API informa el error. Para garantizar la publicación ante caídas conviene añadir Transactional Outbox; la entrega y el correo también pueden repetirse, por lo que un sistema productivo debe deduplicar `eventId`.
 
 Un evento mínimo podría tener este formato:
 
@@ -73,9 +91,12 @@ Un evento mínimo podría tener este formato:
 {
   "eventId": "identificador-unico",
   "eventType": "order.created",
-  "occurredAt": "2026-11-18T12:00:00Z",
-  "orderId": "identificador-del-pedido",
-  "customerEmail": "cliente@example.com"
+  "occurredAt": "2026-11-25T17:00:00Z",
+  "orderId": 123,
+  "customerEmail": "cliente@example.com",
+  "items": [
+    { "skuCode": "ABC-123", "quantity": 2 }
+  ]
 }
 ```
 
@@ -86,13 +107,13 @@ RabbitMQ es un intermediario de mensajes, **no** una base de datos de pedidos. E
 ## Estado actual del repositorio
 
 - **Product Service:** implementa endpoints CRUD bajo `/api/products` y usa MongoDB. Consulta [ProductController.java](./product-service/src/main/java/com/springboot_microservices/product_service/controller/ProductController.java) y [su configuración](./product-service/src/main/resources/application.yaml).
-- **Inventory Service:** tiene configuración MySQL y una entidad/repositorio, pero todavía no expone endpoints ni completa la lógica del servicio.
-- **Order Service:** tiene configurada la conexión a PostgreSQL, pero aún no tiene entidades, endpoints ni productor de eventos.
-- **Notification Service:** tiene dependencias de RabbitMQ y correo, y la conexión local al broker configurada; todavía no tiene consumidor ni envío de emails.
-- **RabbitMQ:** [el script de infraestructura](./resources/start-dependencies.sh) crea el broker y las bases locales. No crea exchanges, colas ni bindings.
+- **Inventory Service:** expone CRUD bajo `/api/inventory` y endpoints de reserva/liberación por SKU.
+- **Order Service:** expone CRUD bajo `/api/orders`, persiste pedidos y líneas en PostgreSQL, reserva stock mediante `WebClient` y publica `order.created` tras guardar el pedido.
+- **Notification Service:** consume `notification.order-created`. Con `NOTIFICATION_EMAIL_ENABLED=false` simula el envío y lo registra en el log; con `true` utiliza SMTP, que requiere configurar servidor y credenciales.
+- **RabbitMQ:** [el script de infraestructura](./resources/start-dependencies.sh) crea el broker y las bases locales. Order y Notification declaran exchanges, colas, bindings y DLQ al iniciar.
 - **Gateway, clientes Eureka, Config Server y Keycloak:** están representados en el esquema, pero todavía no están integrados en los servicios.
 
-Por tanto, el único flujo de API visible actualmente es el acceso directo a Product Service. El flujo Order → RabbitMQ → Notification descrito arriba explica cómo debería funcionar al implementar esos componentes, no un flujo que ya se pueda ejecutar.
+Product Service, Order Service e Inventory Service exponen APIs REST directas. Order → Inventory usa HTTP/WebClient; Order → RabbitMQ → Notification usa AMQP para la notificación de pedidos.
 
 ## Ejecución local y direcciones
 
@@ -103,9 +124,9 @@ Al ejecutar las aplicaciones directamente en el host, se conectan a las dependen
 | Gateway | HTTPS en el puerto `9000` (objetivo) | Puerto reservado; Gateway pendiente. |
 | Eureka | `http://localhost:8761` | Aplicación presente; falta activar el servidor y registrar clientes. |
 | Product Service | `http://localhost:8081/api/products` | CRUD disponible si MongoDB está iniciado. |
-| Order Service | `http://localhost:8082` | Puerto configurado; API pendiente. |
-| Inventory Service | `http://localhost:8083` | Puerto configurado; API pendiente. |
-| Notification Service | `http://localhost:8084` | Puerto configurado; consumidor pendiente. |
+| Order Service | `http://localhost:8082/api/orders` | CRUD disponible; reserva stock en Inventory. |
+| Inventory Service | `http://localhost:8083/api/inventory` | CRUD y endpoints de reserva si MySQL está iniciado. |
+| Notification Service | `http://localhost:8084` | Consumidor AMQP; simula email por defecto y usa SMTP si `NOTIFICATION_EMAIL_ENABLED=true`. |
 | RabbitMQ AMQP | `localhost:5672` | Broker iniciado por el script de infraestructura. |
 | RabbitMQ Management | `http://localhost:15672` | Interfaz de administración local. |
 
