@@ -48,7 +48,7 @@ Las APIs directas `/api/products`, `/api/orders` y `/api/inventory` están imple
 Al crear un pedido, Order Service llama sincrónicamente a Inventory Service con `WebClient`:
 
 ```http
-POST /api/inventory/{skuCode}/reservations
+PUT /api/inventory/{skuCode}/reservations
 Content-Type: application/json
 
 {"quantity": 2}

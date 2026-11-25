@@ -64,7 +64,7 @@ public class InventoryController {
         return ResponseEntity.noContent().build();
     }
 
-    @PostMapping("/{skuCode}/reservations")
+    @PutMapping("/{skuCode}/reservations")
     public ResponseEntity<Void> reserve(
             @PathVariable String skuCode,
             @Valid @RequestBody InventoryReservationRequestDTO request) {
@@ -72,7 +72,7 @@ public class InventoryController {
         return ResponseEntity.noContent().build();
     }
 
-    @PostMapping("/{skuCode}/reservations/release")
+    @PutMapping("/{skuCode}/reservations/release")
     public ResponseEntity<Void> release(
             @PathVariable String skuCode,
             @Valid @RequestBody InventoryReservationRequestDTO request) {

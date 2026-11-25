@@ -5,6 +5,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientRequestException;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
+import org.springframework.web.reactive.function.client.support.WebClientAdapter;
+import org.springframework.web.service.invoker.HttpServiceProxyFactory;
 import org.springframework.web.server.ResponseStatusException;
 
 import com.springboot_microservices.order_service.dto.InventoryReservationRequestDTO;
@@ -12,32 +14,31 @@ import com.springboot_microservices.order_service.dto.InventoryReservationReques
 @Component
 public class InventoryClient {
 
-    private final WebClient webClient;
+    private final InventoryHttpService inventoryHttpService;
 
     public InventoryClient(WebClient inventoryWebClient) {
-        this.webClient = inventoryWebClient;
+        this.inventoryHttpService = HttpServiceProxyFactory
+                .builderFor(WebClientAdapter.create(inventoryWebClient))
+                .build()
+                .createClient(InventoryHttpService.class);
     }
 
     public void reserve(String skuCode, int quantity) {
-        postReservation(skuCode, quantity, false);
+        putReservation(skuCode, quantity, false);
     }
 
     public void release(String skuCode, int quantity) {
-        postReservation(skuCode, quantity, true);
+        putReservation(skuCode, quantity, true);
     }
 
-    private void postReservation(String skuCode, int quantity, boolean release) {
-        String path = release
-                ? "/api/inventory/{skuCode}/reservations/release"
-                : "/api/inventory/{skuCode}/reservations";
-
+    private void putReservation(String skuCode, int quantity, boolean release) {
         try {
-            webClient.post()
-                    .uri(path, skuCode)
-                    .bodyValue(new InventoryReservationRequestDTO(quantity))
-                    .retrieve()
-                    .toBodilessEntity()
-                    .block();
+            InventoryReservationRequestDTO request = new InventoryReservationRequestDTO(quantity);
+            if (release) {
+                inventoryHttpService.release(skuCode, request).block();
+            } else {
+                inventoryHttpService.reserve(skuCode, request).block();
+            }
         } catch (WebClientResponseException ex) {
             if (ex.getStatusCode().is4xxClientError()) {
                 throw new ResponseStatusException(
